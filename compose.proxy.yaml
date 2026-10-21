@@ -1,0 +1,46 @@
+# Team Kazakhstan — ALTERNATIVE without Tailscale: an existing HTTPS reverse
+# proxy (for example DSM → Login Portal → Advanced → Reverse Proxy with a
+# certificate for team.company.kz) forwards to 127.0.0.1:${HTTP_BIND port}.
+#   docker compose -f compose.proxy.yaml up -d
+# TRUST_PROXY must be the address the proxy connects from as seen by the
+# container (with Docker's userland proxy: the bridge gateway, usually
+# 172.17.0.1). Keep HTTP_BIND on 127.0.0.1 so nobody else can reach the port.
+
+version: "2.4"
+
+services:
+  app:
+    build: .
+    image: team-kazakhstan:${APP_VERSION:-1.0.0}
+    container_name: ${CONTAINER_PREFIX:-teamkz}-app
+    restart: unless-stopped
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: ${CONTAINER_MEMORY:-512m}
+    ports:
+      - "${HTTP_BIND:-127.0.0.1:8095}:8080"
+    environment:
+      NODE_ENV: production
+      APP_BASE_URL: ${APP_BASE_URL:?Set APP_BASE_URL=https://team.company.kz in .env}
+      TRUST_PROXY: ${TRUST_PROXY_IP:-172.17.0.1}
+      EXTRA_ALLOWED_HOSTS: ${EXTRA_ALLOWED_HOSTS:-}
+      SESSION_TTL_HOURS: ${SESSION_TTL_HOURS:-168}
+      SESSION_IDLE_HOURS: ${SESSION_IDLE_HOURS:-48}
+      INVITE_TTL_HOURS: ${INVITE_TTL_HOURS:-72}
+      APP_BACKUP_RETENTION_DAYS: ${APP_BACKUP_RETENTION_DAYS:-14}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      TZ: ${TZ:-Asia/Almaty}
+    volumes:
+      - ${DATA_DIR:?Set DATA_DIR in .env}/app:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

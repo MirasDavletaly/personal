@@ -1,0 +1,375 @@
+#!/bin/bash
+# Fake `docker` for testing the NAS scripts without a Docker daemon (dev only).
+# Containers are records under $SIM_ROOT/docker-state; the app "container"
+# runs the real build (dist/) with node, the Tailscale "container" is faked.
+set -u
+set -o pipefail
+S="$SIM_ROOT/docker-state"
+APPSRC="$SIM_APP_SRC"
+mkdir -p "$S/containers" "$S/images"
+echo "docker $*" >> "$S/calls.log"
+
+fail() {
+  echo "fake-docker: $*" >&2
+  exit 1
+}
+cdir() { echo "$S/containers/$1"; }
+idir() { echo "$S/images/$(echo "$1" | tr '/:' '__')"; }
+exists() { [ -d "$(cdir "$1")" ]; }
+get() { cat "$(cdir "$1")/$2" 2> /dev/null || true; }
+# The app is a background node process; its pid is the one Git Bash knows.
+alive() {
+  local p
+  p=$(get "$1" pid)
+  [ -n "$p" ] && kill -0 "$p" 2> /dev/null
+}
+
+refresh() { # a crashed app process shows as exited
+  local n=$1
+  if [ "$(get "$n" state)" = running ] && [ "$(get "$n" kind)" = app ] && ! alive "$n"; then echo exited > "$(cdir "$n")/state"; fi
+}
+
+host_of() { # container path -> windows host path for this container
+  local n=$1 p=$2 v h c
+  while IFS= read -r v; do
+    [ -n "$v" ] || continue
+    h=${v%%:*}
+    c=${v#*:}
+    c=${c%%:*}
+    case $p in "$c" | "$c"/*) printf '%s%s' "$(cygpath -w "$h")" "${p#"$c"}" && return ;; esac
+  done < "$(cdir "$n")/vols"
+  printf '%s' "$p"
+}
+
+app_env() { # env assignments for the node process of container $1
+  local n=$1 line
+  while IFS= read -r line; do
+    line=${line%$''}
+    [ -n "$line" ] && printf '%s
+' "$line"
+  done < "$(cdir "$n")/envfile"
+  echo "DATA_DIR=$(host_of "$n" /data)"
+  echo "PORT=$(get "$n" port)"
+  echo "HOST=127.0.0.1"
+}
+
+start_app() {
+  local n=$1 d
+  d=$(cdir "$n")
+  local envs=()
+  while IFS= read -r line; do envs+=("$line"); done < <(app_env "$n")
+  # node itself must be the background job: with `env node` or `nohup node`,
+  # $! would be the wrapper and stopping it would leave node running.
+  (
+    cd "$APPSRC" || exit 1
+    for kv in "${envs[@]}"; do export "${kv?}"; done
+    node dist/server/main.js >> "$d/log" 2>&1 < /dev/null &
+    echo $! > "$d/pid"
+  )
+  echo running > "$d/state"
+}
+
+stop_app() {
+  local n=$1 p
+  p=$(get "$n" pid)
+  if [ -n "$p" ] && alive "$n"; then
+    kill "$p" 2> /dev/null
+    sleep 0.5
+  fi
+  # SIGTERM on Linux lets the app remove its heartbeat; emulate that here.
+  rm -f "$(cygpath -u "$(host_of "$n" /data)")/.app-running" 2> /dev/null
+  echo exited > "$(cdir "$n")/state"
+}
+
+run_node() { # container node-args... (exec / one-off): maps paths in and out
+  local n=$1
+  shift
+  local envs=() args=() a data
+  while IFS= read -r line; do envs+=("$line"); done < <(app_env "$n")
+  for a in "$@"; do args+=("$(host_of "$n" "$a")"); done
+  data=$(host_of "$n" /data)
+  (cd "$APPSRC" && env "${envs[@]}" node "${args[@]}") 2>&1 | while IFS= read -r line; do
+    line=${line//"$data"//data}
+    case $line in BACKUP_FILE=*) line=${line//\\//} ;; esac
+    printf '%s\n' "$line"
+  done
+}
+
+cmd=${1:-}
+shift || true
+case $cmd in
+  version)
+    case "$*" in
+      *Server.Version*) echo "${SIM_DOCKER_VERSION:-20.10.3}" ;;
+      *Server.Arch*) echo "${SIM_ARCH:-amd64}" ;;
+      *) echo "client 20.10.3, server ${SIM_DOCKER_VERSION:-20.10.3} linux/${SIM_ARCH:-amd64}" ;;
+    esac
+    ;;
+  info) echo "kernel 4.4.302+ (simulated); os DSM; storage btrfs" ;;
+  compose) exit 1 ;;
+  network)
+    case "$*" in
+      *inspect*) echo 172.17.0.1 ;;
+      *) printf 'NETWORK ID   NAME     DRIVER\nabc          bridge   bridge\n' ;;
+    esac
+    ;;
+  pull)
+    d=$(idir "$1")
+    mkdir -p "$d"
+    echo "sha256:$(echo "$1" | sha256sum | cut -c1-12)" > "$d/id"
+    echo "${SIM_ARCH:-amd64}" > "$d/arch"
+    ;;
+  build)
+    ver=""
+    ref=""
+    while [ $# -gt 0 ]; do
+      case $1 in
+        --build-arg) ver=${2#APP_VERSION=}; shift ;;
+        -t) ref=$2; shift ;;
+      esac
+      shift
+    done
+    [ -f "$APPSRC/Dockerfile" ] || fail "no Dockerfile"
+    echo "Step 1/2 : FROM node:24.22.0-alpine3.24 (simulated build)"
+    d=$(idir "$ref")
+    mkdir -p "$d"
+    echo "sha256:$(date +%s%N | sha256sum | cut -c1-12)" > "$d/id"
+    echo "${SIM_ARCH:-amd64}" > "$d/arch"
+    echo "$ver" > "$d/version"
+    echo "$ref" > "$d/ref"
+    ;;
+  load)
+    [ "$1" = -i ] || fail "load needs -i"
+    out=$(python -I - "$2" << 'PY'
+import json, sys, tarfile
+with tarfile.open(sys.argv[1]) as t:
+    m = json.load(t.extractfile('manifest.json'))[0]
+    c = json.load(t.extractfile(m['Config']))
+    print(m['RepoTags'][0], c['architecture'], (c['config'].get('Labels') or {}).get('org.opencontainers.image.version', ''), m['Config'].split('/')[-1].replace('.json', ''))
+PY
+) || fail "not a docker image archive: $2"
+    read -r ref arch ver id <<< "$out"
+    d=$(idir "$ref")
+    mkdir -p "$d"
+    echo "sha256:${id#sha256:}" > "$d/id"
+    echo "$arch" > "$d/arch"
+    echo "$ver" > "$d/version"
+    echo "$ref" > "$d/ref"
+    echo "Loaded image: $ref"
+    ;;
+  image)
+    sub=$1
+    shift
+    case $sub in
+      inspect)
+        f=""
+        if [ "$1" = -f ]; then
+          f=$2
+          shift 2
+        fi
+        d=$(idir "$1")
+        [ -d "$d" ] || exit 1
+        case $f in
+          "") echo "[{}]" ;;
+          *Architecture*) cat "$d/arch" ;;
+          *.Id*) cat "$d/id" ;;
+          *org.opencontainers.image.version*) cat "$d/version" 2> /dev/null || echo "<no value>" ;;
+          *) echo "<no value>" ;;
+        esac
+        ;;
+      ls)
+        repo=$1
+        for d in "$S"/images/*; do
+          [ -f "$d/ref" ] || continue
+          r=$(cat "$d/ref")
+          [ "${r%%:*}" = "$repo" ] && echo "${r#*:}"
+        done
+        ;;
+      *) fail "image $sub" ;;
+    esac
+    ;;
+  rmi)
+    d=$(idir "$1")
+    [ -d "$d" ] || exit 1
+    rm -rf "$d"
+    echo "Untagged: $1"
+    ;;
+  container)
+    [ "$1" = inspect ] || fail "container $1"
+    shift
+    f=""
+    if [ "$1" = -f ]; then
+      f=$2
+      shift 2
+    fi
+    n=$1
+    exists "$n" || exit 1
+    refresh "$n"
+    case $f in
+      "") echo "[{}]" ;;
+      *State.Status*image=*) echo "image=$(get "$n" image) state=$(get "$n" state) managed=$(grep '^org.teamkz.managed=' "$(cdir "$n")/labels" | cut -d= -f2)" ;;
+      *State.Status*) get "$n" state ;;
+      *RestartCount*) get "$n" restarts | grep . || echo 0 ;;
+      *Config.Image*) get "$n" image ;;
+      *.Id*) get "$n" id ;;
+      *Config.Labels*)
+        key=$(printf '%s' "$f" | sed -n 's/.*"\([^"]*\)".*/\1/p')
+        v=$(grep "^$key=" "$(cdir "$n")/labels" | head -n 1 | cut -d= -f2-)
+        echo "${v:-<no value>}"
+        ;;
+      *) echo "<no value>" ;;
+    esac
+    ;;
+  run)
+    detach=0
+    rm_after=0
+    name=""
+    envfile=""
+    net=""
+    ports=()
+    vols=()
+    labels=()
+    while [ $# -gt 0 ]; do
+      case $1 in
+        -d) detach=1 ;;
+        --rm) rm_after=1 ;;
+        --read-only) ;;
+        --name) name=$2; shift ;;
+        --label) labels+=("$2"); shift ;;
+        --env-file) envfile=$2; shift ;;
+        -v) vols+=("$2"); shift ;;
+        -p) ports+=("$2"); shift ;;
+        --network) net=$2; shift ;;
+        --restart | --user | --tmpfs | --cap-drop | --security-opt | --pids-limit | --log-driver | --log-opt | --memory | --hostname) shift ;;
+        -*) fail "unknown run option $1" ;;
+        *) break ;;
+      esac
+      shift
+    done
+    image=$1
+    shift
+    [ -d "$(idir "$image")" ] || fail "Unable to find image '$image' locally"
+    [ -z "$envfile" ] || [ -f "$envfile" ] || fail "env file $envfile not found"
+    for v in ${vols[@]+"${vols[@]}"}; do
+      [ -d "${v%%:*}" ] || fail "bind source path does not exist: ${v%%:*}"
+    done
+    [ -n "$name" ] || name="oneoff-$$"
+    if exists "$name" && [ $rm_after = 0 ]; then fail "Conflict. The container name \"/$name\" is already in use"; fi
+    d=$(cdir "$name")
+    rm -rf "$d"
+    mkdir -p "$d"
+    printf '%s\n' "$image" > "$d/image"
+    printf '%s\n' "$net" > "$d/net"
+    printf '%s\n' ${vols[@]+"${vols[@]}"} > "$d/vols"
+    printf '%s\n' ${ports[@]+"${ports[@]}"} > "$d/ports"
+    printf '%s\n' ${labels[@]+"${labels[@]}"} > "$d/labels"
+    if [ -n "$envfile" ]; then cp "$envfile" "$d/envfile"; else : > "$d/envfile"; fi
+    echo "c$(date +%s%N | sha256sum | cut -c1-12)" > "$d/id"
+    case $image in
+      tailscale/*)
+        echo tailscale > "$d/kind"
+        grep -q '^TS_AUTHKEY=tskey-' "$d/envfile" || [ -f "${SIM_TS_STATE:-/nonexistent}" ] || [ -n "$(ls -A "$(printf '%s' "${vols[0]%%:*}")" 2> /dev/null)" ] || fail "tailscale: no auth key and no state"
+        touch "${vols[0]%%:*}/tailscaled.state"
+        echo running > "$d/state"
+        ;;
+      *)
+        echo app > "$d/kind"
+        if [ ${#ports[@]} -gt 0 ]; then
+          p=${ports[0]%:8080}
+          echo "${p##*:}" > "$d/port"
+        else
+          echo $((20000 + RANDOM % 20000)) > "$d/port"
+        fi
+        if [ $rm_after = 1 ]; then
+          [ "${1:-}" = node ] && shift
+          run_node "$name" "$@"
+          rc=$?
+          rm -rf "$d"
+          exit $rc
+        fi
+        start_app "$name"
+        ;;
+    esac
+    echo "$(get "$name" id)"
+    ;;
+  exec)
+    [ "$1" = -i ] && shift # stdin is passed through to node anyway
+    n=$1
+    shift
+    exists "$n" || fail "No such container: $n"
+    refresh "$n"
+    [ "$(get "$n" state)" = running ] || fail "Container $n is not running"
+    if [ "$(get "$n" kind)" = tailscale ]; then
+      case "$*" in
+        "tailscale status --json")
+          # Like the real node: the machine name comes from TS_HOSTNAME.
+          h=$(sed -n 's/^TS_HOSTNAME=//p' "$(cdir "$n")/envfile" | tr -d '\r' | head -n 1)
+          h=${h:-team}
+          printf '{\n  "Version": "1.104.2",\n  "BackendState": "Running",\n  "Self": {\n    "HostName": "%s",\n    "DNSName": "%s.tail81e59e.ts.net.",\n    "Online": true\n  },\n  "CertDomains": [\n    "%s.tail81e59e.ts.net"\n  ]\n}\n' "$h" "$h" "$h"
+          ;;
+        *wget*127.0.0.1:8080*)
+          for c in "$S"/containers/*; do
+            cn=$(basename "$c")
+            if [ "$(cat "$c/net")" = "container:$n" ] && [ "$(cat "$c/state")" = running ] && alive "$cn"; then
+              curl -fsS -m 5 -o /dev/null "http://127.0.0.1:$(cat "$c/port")/api/health" && exit 0
+            fi
+          done
+          exit 1
+          ;;
+        "tailscale status") echo "100.64.0.9  team  tagged-devices linux  -" ;;
+        "tailscale serve status") echo "https://team.tail81e59e.ts.net (tailnet only)"; echo "|-- / proxy http://127.0.0.1:8080" ;;
+        "tailscale funnel status") echo "No serve config" ;;
+        *) fail "tailscale exec $*" ;;
+      esac
+    else
+      alive "$n" || fail "container $n process is gone"
+      [ "$1" = node ] || fail "app exec $*"
+      shift
+      run_node "$n" "$@"
+    fi
+    ;;
+  start)
+    n=$1
+    exists "$n" || fail "No such container: $n"
+    refresh "$n"
+    if [ "$(get "$n" kind)" = app ]; then alive "$n" || start_app "$n"; else echo running > "$(cdir "$n")/state"; fi
+    ;;
+  stop)
+    [ "$1" = -t ] && shift 2
+    n=$1
+    exists "$n" || fail "No such container: $n"
+    if [ "$(get "$n" kind)" = app ]; then stop_app "$n"; else echo exited > "$(cdir "$n")/state"; fi
+    echo "$n"
+    ;;
+  restart)
+    n=$1
+    exists "$n" || fail "No such container: $n"
+    [ "$(get "$n" kind)" = app ] && stop_app "$n" && start_app "$n"
+    ;;
+  rm)
+    [ "$1" = -f ] && shift
+    n=$1
+    exists "$n" || fail "No such container: $n"
+    [ "$(get "$n" kind)" = app ] && stop_app "$n"
+    rm -rf "$(cdir "$n")"
+    ;;
+  logs)
+    [ "$1" = --tail ] && shift 2
+    tail -n 40 "$(cdir "$1")/log" 2> /dev/null || true
+    ;;
+  ps)
+    all=0
+    [ "${1:-}" = -a ] && all=1 && shift
+    for c in "$S"/containers/*; do
+      [ -d "$c" ] || continue
+      cn=$(basename "$c")
+      refresh "$cn"
+      st=$(cat "$c/state")
+      [ $all = 1 ] || [ "$st" = running ] || continue
+      pp=""
+      while IFS= read -r p; do [ -n "$p" ] && pp="${pp}${p%:8080}->8080/tcp "; done < "$c/ports"
+      echo "$cn $pp"
+    done
+    ;;
+  *) fail "unsupported command: $cmd $*" ;;
+esac

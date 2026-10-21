@@ -1,0 +1,82 @@
+# Team Kazakhstan — ALTERNATIVE start with Docker Compose (Container Manager →
+# Project on DSM 7.2, or docker-compose 1.28+ / Docker Compose v2).
+# The recommended way on this NAS is scripts/*.sh via Task Scheduler (no
+# Compose needed). Use one way only: both create the same containers.
+#
+# Compose file format 2.4: understood by docker-compose 1.28 (DSM 6.2 Docker
+# package) and by Compose v2 (Container Manager); v2 may warn that
+# "version" is obsolete — harmless.
+#
+# Before the first `up`:
+#   1. .env next to this file with DATA_DIR, TS_AUTHKEY and an explicit
+#      APP_BASE_URL=https://team.<tailnet>.ts.net (no "auto" with Compose);
+#   2. prepared data folders:  sudo bash scripts/setup.sh --prepare-only
+#   3. the image: docker load -i images/team-kazakhstan-1.0.0-linux-<arch>.tar
+#      or let Compose build it (build: . below).
+# Then: docker compose up -d   (or docker-compose up -d)
+
+version: "2.4"
+
+services:
+  tailscale:
+    image: ${TAILSCALE_IMAGE:-tailscale/tailscale:v1.104.2}
+    container_name: ${CONTAINER_PREFIX:-teamkz}-tailscale
+    hostname: ${TS_HOSTNAME:-team}
+    restart: unless-stopped
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY:-}
+      TS_HOSTNAME: ${TS_HOSTNAME:-team}
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_AUTH_ONCE: "true"
+      # Userspace networking: no /dev/net/tun, no extra capabilities, and the
+      # NAS's own Tailscale and other machines stay untouched.
+      TS_USERSPACE: "true"
+      TS_SERVE_CONFIG: /config/serve.json
+      TS_EXTRA_ARGS: ${TS_EXTRA_ARGS:-}
+    volumes:
+      - ${DATA_DIR:?Set DATA_DIR in .env}/tailscale:/var/lib/tailscale
+      # HTTPS on 443 → app on 127.0.0.1:8080; no Funnel (not public). To
+      # publish through Funnel, copy serve-funnel.json over serve.json.
+      - ./deploy/tailscale:/config:ro
+    ports:
+      - "${HTTP_BIND:-127.0.0.1:8095}:8080"
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  app:
+    build: .
+    image: team-kazakhstan:${APP_VERSION:-1.0.0}
+    container_name: ${CONTAINER_PREFIX:-teamkz}-app
+    restart: unless-stopped
+    # Shares the network of the Tailscale container: Tailscale Serve reaches
+    # the app on 127.0.0.1:8080, which is the only trusted proxy address.
+    network_mode: "service:tailscale"
+    depends_on:
+      - tailscale
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: ${CONTAINER_MEMORY:-512m}
+    environment:
+      NODE_ENV: production
+      APP_BASE_URL: ${APP_BASE_URL:?Set APP_BASE_URL=https://team.<tailnet>.ts.net in .env}
+      TRUST_PROXY: loopback
+      EXTRA_ALLOWED_HOSTS: ${EXTRA_ALLOWED_HOSTS:-}
+      SESSION_TTL_HOURS: ${SESSION_TTL_HOURS:-168}
+      SESSION_IDLE_HOURS: ${SESSION_IDLE_HOURS:-48}
+      INVITE_TTL_HOURS: ${INVITE_TTL_HOURS:-72}
+      APP_BACKUP_RETENTION_DAYS: ${APP_BACKUP_RETENTION_DAYS:-14}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      TZ: ${TZ:-Asia/Almaty}
+    volumes:
+      - ${DATA_DIR:?Set DATA_DIR in .env}/app:/data
+    logging: *logging

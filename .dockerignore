@@ -1,0 +1,20 @@
+# Only sources go into the build context.
+node_modules
+dist
+data
+.tmp*
+logs
+state
+images
+backups
+release
+*.tar
+*.tar.gz
+*.zip
+.env
+.git
+test
+tools
+docs
+# Ready-to-upload NAS folder (contains .env with secrets and image archives)
+personal
