@@ -195,10 +195,14 @@ expiry** (иначе через ~180 дней машина выпадет из t
 | Team KZ watchdog | Запланированная (Scheduled Task): ежедневно, «Частота» **каждые 15 минут** (Repeat every 15 minutes), первый запуск 00:00, последний 23:45 | `bash /volume1/docker/team-kz/scripts/start.sh --check` |
 | Team KZ backup | Запланированная (Scheduled Task): ежедневно, 03:15 | `bash /volume1/docker/team-kz/scripts/backup.sh` |
 
-* После перезагрузки контейнеры поднимает сам Docker (`--restart
-  unless-stopped`); задача «boot» ждёт Docker до 10 минут и проверяет
-  порядок и путь через Tailscale. Если вы остановили справочник через
-  stop.sh, после перезагрузки он **не** запускается, пока не выполнен start.sh.
+* Задача «boot» **обязательна**. При выключении DSM останавливает все
+  контейнеры, а после включения запускает их сам, но не по порядку:
+  приложение стартует раньше своего Tailscale-контейнера и остаётся
+  выключенным (`cannot join network of a non running container` в
+  `/var/log/messages`; так проверено на реальном NAS с расписанием питания).
+  «boot» ждёт Docker до 10 минут и запускает оба контейнера в нужном порядке.
+  Если вы остановили справочник через stop.sh, после перезагрузки он **не**
+  запускается, пока не выполнен start.sh.
 * «watchdog» молчит, если всё в порядке; при сбое (контейнер упал, после
   перезапуска Tailscale-контейнера приложение недоступно) чинит и пишет в
   `logs/watchdog.log`. Также удаляет старый `ADMIN-LINK.txt`.
@@ -368,6 +372,7 @@ update.sh перед миграциями: задача `rollback.sh --yes`. И�
 | `Unknown host name` | открывать по имени `https://team…ts.net`, не по IP |
 | камера: «доступ запрещён» | разрешить камеру для сайта (инструкция показывается в окне) |
 | `the application did not become healthy` | хвост журнала в логе задачи; `diag.sh` |
+| сайт не открывается после ночи / перезагрузки; в diag `personal-app` или `team-app` Exited, `cannot join network of a non running container` | задачи «boot» и «watchdog» (раздел 5); ночные выключения — Control Panel → Hardware & Power → Power Schedule (в diag: `PowerOff task`, `System is going to [poweroff]`) |
 
 ## 12. Безопасность
 

@@ -226,6 +226,8 @@ step "diag.sh" 0 sh_ diag.sh
 reject "diag masks the auth key" "SIMULATEDSECRET" "$OUT"
 expect "diag shows funnel status" "funnel status"
 expect "diag shows the app status" "schema version"
+expect "diag shows restart times" "restarts and outages"
+expect "diag shows the watchdog log" "logs/start.log"
 
 echo "-- conflicts with other services"
 mkdir -p "$SIM/docker-state/containers/kzit"

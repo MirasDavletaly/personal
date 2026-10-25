@@ -36,5 +36,8 @@ First release.
 
 * Optional public access through Tailscale Funnel: `TS_FUNNEL` in `.env`,
   `scripts/funnel.sh on | off | status` (off by default).
+* `diag.sh`: section "restarts and outages" (NAS and Docker start time, last
+  start/stop of both containers, app starts and errors, script logs, DSM
+  shutdown and Docker package messages) to explain night outages.
 
 Database schema: version 2 (`001_initial.sql`, `002_base_companies.sql`).

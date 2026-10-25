@@ -106,8 +106,8 @@ command that keeps container/image state in files and runs the real build
 (dist/) as the app "container"; Tailscale is faked. It checks the script
 logic only — not Docker, not Tailscale, not DSM.
 
-Final run with `release/team-kazakhstan-1.0.0-linux-amd64.tar`: **105 / 105
-checks passed** (20 min 50 s on this PC). Sections: configuration errors (missing
+Final run with `release/team-kazakhstan-1.0.0-linux-amd64.tar`: **107 / 107
+checks passed** (11 min 10 s on this PC). Sections: configuration errors (missing
 `.env`, http address, Docker 19.03 refused with clear messages); first
 installation (archive SHA-256 verified, `docker load`, architecture check,
 data folder owner, Tailscale "connected", app read-only/non-root/no
@@ -124,7 +124,7 @@ restore (refused without `--yes-overwrite`, then restored with a safety
 backup, sign-in works); update 1.0.0 → 1.0.1 (backup before migrations,
 app recreated, previous image recorded) and rollback (needs `--yes`, back
 on 1.0.0, start.sh keeps it); admin reset link, demo data only with a flag,
-diag.sh masks the auth key; conflicts (port of another container, port of a
+diag.sh masks the auth key and shows restart times and script logs; conflicts (port of another container, port of a
 non-Docker process, foreign container with our name — all refused before
 anything changes); proxy mode (Tailscale container removed, bridge gateway
 trusted, health on the published port); clean installation with
@@ -179,7 +179,15 @@ answering through Tailscale, administrator `Miras` created from `.env`. The
 Docker warning about `--pids-limit` (kernel without the pids cgroup) is
 harmless. The address did not open on a device outside the tailnet, so
 `scripts/funnel.sh` (Tailscale Funnel, `TS_FUNNEL`) was added; Funnel itself
-is checked only in the simulation, not yet on the NAS.
+is checked on the NAS: `funnel.sh on` reported "Funnel on" for the address.
+
+`diag.sh` from the NAS (2026-10-23) explained the night outages: the DSM
+power schedule switches the NAS off at 00:00 and on at 06:00; at boot DSM
+started `personal-app` before `personal-tailscale` and the app failed with
+`cannot join network of a non running container` (the same happened to
+another container of the NAS that uses this network mode). The boot task
+`start.sh --boot` (and the watchdog) start both in the right order; the
+README now marks the boot task as mandatory.
 
 ## Not verified here (needs the real NAS, Docker, HTTPS, phones)
 

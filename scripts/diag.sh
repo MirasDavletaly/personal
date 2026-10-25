@@ -97,7 +97,7 @@ run() { printf '$ %s\n' "$*"; "$@" 2>&1 | head -n "${LINES_MAX:-60}"; }
       echo "--- Tailscale of this app"
       LINES_MAX=20 run docker exec "$TS_CT" tailscale status
       run docker exec "$TS_CT" tailscale serve status
-      echo "(Funnel must be off: the directory is not public)"
+      echo "(Funnel: TS_FUNNEL=$TS_FUNNEL in .env; true = public address)"
       run docker exec "$TS_CT" tailscale funnel status
     fi
     echo "--- reachability"
@@ -106,6 +106,30 @@ run() { printf '$ %s\n' "$*"; "$@" 2>&1 | head -n "${LINES_MAX:-60}"; }
       proxy_path_ok && echo "through $DEPLOY_MODE: OK" || echo "through $DEPLOY_MODE: FAILED"
       run docker exec "$APP_CT" node dist/server/cli.js status
     fi
+
+    section "restarts and outages (when and why it stopped)"
+    up=$(cut -d. -f1 /proc/uptime 2> /dev/null)
+    [ -z "$up" ] || echo "NAS running since: $(date -d "@$(($(date +%s) - up))" '+%Y-%m-%d %H:%M' 2> /dev/null) ($((up / 3600)) h)"
+    dpid=$(pidof dockerd 2> /dev/null | cut -d' ' -f1)
+    [ -z "$dpid" ] || echo "Docker running since: $(stat -c %y "/proc/$dpid" 2> /dev/null | cut -d. -f1)"
+    for c in "$APP_CT" "$TS_CT"; do
+      ct_exists "$c" || continue
+      echo "$c: $(docker container inspect -f 'started={{.State.StartedAt}} finished={{.State.FinishedAt}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} restarts={{.RestartCount}}' "$c")"
+    done
+    if ct_exists "$APP_CT"; then
+      echo "--- app starts, stops and errors, last 3 days"
+      docker logs --since 72h "$APP_CT" 2>&1 | grep -E 'Team Kazakhstan started|shutting down|"level":(50|60)' | tail -n 30
+    fi
+    for f in watchdog start backup funnel; do
+      [ -f "$LOG_DIR/$f.log" ] || continue
+      echo "--- logs/$f.log (last lines)"
+      tail -n 15 "$LOG_DIR/$f.log"
+    done
+    echo "--- DSM: shutdowns, reboots, Docker package"
+    for f in /var/log/messages /var/log/synopkg.log /var/log/synolog/synosys.log; do
+      [ -r "$f" ] || continue
+      grep -aiE 'shutdown|reboot|poweroff|power off|ContainerManager|Docker' "$f" | grep -viE 'veth|docker0|br-[0-9a-f]{6}' | tail -n 25 | sed "s|^|$f: |"
+    done
   else
     echo ".env could not be read: $( (load_config) 2>&1 | tail -n 1)"
   fi

@@ -7,8 +7,10 @@
 #   bash .../scripts/start.sh --check   Task Scheduler every 15 minutes: silent
 #                                       when all is well, repairs otherwise
 #                                       (logs/watchdog.log)
-# Docker itself restarts the containers after a reboot (restart policy
-# unless-stopped); these tasks make sure the order and the Tailscale path work.
+# DSM stops the containers when it shuts down and starts them again after
+# boot, but in no particular order: the app can start before the Tailscale
+# container whose network it uses and then stays down ("cannot join network
+# of a non running container"). These tasks start both in the right order.
 # Never changes the installed version: that is update.sh / rollback.sh.
 
 TKZ_SCRIPT_NAME=start

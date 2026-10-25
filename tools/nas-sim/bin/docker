@@ -354,7 +354,13 @@ PY
     rm -rf "$(cdir "$n")"
     ;;
   logs)
-    [ "$1" = --tail ] && shift 2
+    while [ $# -gt 1 ]; do
+      case $1 in
+        --tail | --since) shift 2 ;;
+        -t | --timestamps) shift ;;
+        *) break ;;
+      esac
+    done
     tail -n 40 "$(cdir "$1")/log" 2> /dev/null || true
     ;;
   ps)
